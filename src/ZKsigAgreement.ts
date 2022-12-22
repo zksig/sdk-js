@@ -4,9 +4,14 @@ import { CID } from "multiformats/cid";
 import * as codec from "@ipld/dag-pb";
 import { sha256 } from "multiformats/hashes/sha2";
 import { PDFDocument, PDFImage } from "pdf-lib";
-import { createAgreement } from "./contract";
+import { ZKsigDigitalSignatureContract } from "./ZKsigDigitalSignatureContract";
 
-export type AgreementDescription = { identifier: string; fields: string[] }[];
+export type AgreementDescription = {
+  identifier: string;
+  fields: string[];
+  allowedToUse: number;
+  signer?: string;
+}[];
 
 export type AddSignatureFieldOptions = {
   x: number;
@@ -15,29 +20,76 @@ export type AddSignatureFieldOptions = {
   identifier: string;
 };
 
+/**
+ * Create a new ZKsig agreement from a PDF. Helps add fields
+ * and manage the PDF bytes
+ *
+ * @example
+ * ```typescript
+ * const agreement = new ZKsigAgreement();
+ * await agreement.init(pdfBytes);
+ * await agreement.addSignatureField({
+ *   page: 1, // page on which the signature should be
+ *   x: 10, // x coordinate on the PDF where the signature should start
+ *   y: 10, // y coordinate on the PDF where the signature should start
+ *   identifier: "employee", // signature field name used to group multiple fields with the same signer
+ * });
+ * await agreement.createOnChain(signer);
+ * ```
+ */
 export class ZKsigAgreement {
   private _identifier: string = "";
   private _description: AgreementDescription = [];
   private _doc: PDFDocument | null = null;
   private _signatureImage: PDFImage | null = null;
 
+  /**
+   * Load a PDF. This must be called before other methods.
+   *
+   * @param pdf PDF bytes
+   * @example
+   * ```js
+   * // on change event handler for file input type
+   * const handleEvent = async (event) => {
+   *   await agreement.init(
+   *     new Uint8Array(await event.files[0].arrayBuffer())
+   *   );
+   * }
+   * ```
+   */
   async init(pdf: Uint8Array) {
     this._doc = await PDFDocument.load(pdf);
     this._description = [];
   }
 
+  /**
+   * Check to see if a PDF has been loaded with the `init` method
+   */
   get isInitialized() {
     return !!this._doc;
   }
 
+  /**
+   * Get the agreements `identifier` set with `setIdentifier`.
+   * The identifier is used as the title of the agreement.
+   */
   getIdentifier() {
     return this._identifier;
   }
 
+  /**
+   * Set the agreements `identifier`.
+   * The identifier is used as the title of the agreement.
+   */
   setIdentifier(identifier: string) {
     this._identifier = identifier;
   }
 
+  /**
+   * Get the `description` of the agreement.
+   * The description to keep track of the signature fields on
+   * the agreement.
+   */
   getDescription() {
     return this._description;
   }
@@ -50,19 +102,31 @@ export class ZKsigAgreement {
     return this._doc!.getPageCount();
   }
 
+  /**
+   * Call the ZKsig DigitalSignature contract to add the agreement
+   * to the blockchain.
+   *
+   * @param signer Ether `Signer`
+   *
+   * {@link ZKsigDigitalSignatureContract.createAgreement}
+   */
   async createOnChain(signer: Signer) {
     if (!this.isInitialized) {
       throw new Error("Uninitialized. Call the .init(pdf) method");
     }
 
-    return createAgreement({
+    const chainId = await signer.getChainId();
+    const contract = new ZKsigDigitalSignatureContract({
+      chainId,
       signer,
-      identifier: this._identifier,
-      pdf: await this.toBytes(),
-      description: this._description,
     });
+
+    return contract.createAgreement(this);
   }
 
+  /**
+   * Get the PDF in bytes.
+   */
   async toBytes() {
     if (!this.isInitialized) {
       throw new Error("Uninitialized. Call the .init(pdf) method");
@@ -70,6 +134,9 @@ export class ZKsigAgreement {
     return this._doc!.save();
   }
 
+  /**
+   * Get the IPFS CID for the PDF along with all added fields.
+   */
   async getCID() {
     const data = new UnixFS({ type: "file", data: await this.toBytes() });
 
@@ -80,10 +147,19 @@ export class ZKsigAgreement {
     );
   }
 
+  /**
+   * Add a new signer to the agreement. The signer will be added
+   * to the `description`.
+   *
+   * @param identifier An identifier for the signer.
+   */
   addSigner(identifier: string) {
     this._setDescription(identifier);
   }
 
+  /**
+   * Reset the identifier for a signer.
+   */
   renameSigner(oldIdentifier: string, newIdentifier: string) {
     this._description = this._description.map((signer) => {
       if (signer.identifier !== oldIdentifier) return signer;
@@ -91,6 +167,15 @@ export class ZKsigAgreement {
     });
   }
 
+  /**
+   * Add a new signature field to the agreement. This will add
+   * a text field to the PDF.
+   *
+   * @param x The x-coordinate for the field
+   * @param y The y-coordinate for the field
+   * @param page The page the field should appear on
+   * @param identifier The signer's identifier that should be associated with the field
+   */
   async addSignatureField({
     x,
     y,
@@ -141,7 +226,7 @@ export class ZKsigAgreement {
     if (index < 0) {
       this._description = [
         ...this._description,
-        { identifier, fields: fieldName ? [fieldName] : [] },
+        { identifier, fields: fieldName ? [fieldName] : [], allowedToUse: 1 },
       ];
       return;
     }

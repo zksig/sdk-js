@@ -20,17 +20,14 @@ Interacting with the ZKsig smart contract depends on [ethers](https://docs.ether
 
 ```typescript
 // Get a list of agreements for 0xa96bb1719fa7f78b8B2d3c24BBc79e52Ae9a3988
-// This example uses a JsonRpcProvider
-const provider = new providers.JsonRpcProvider(
-  "https://matic-mumbai.chainstacklabs.com	",
-  {
-    name: "Polygon Mumbai",
-    chainId: 80001,
-  }
-);
-const agreements = await getAgreements({
-  provider,
-  address: "0xa96bb1719fa7f78b8B2d3c24BBc79e52Ae9a3988",
+const provider = new providers.Web3Provider(window.ethereum);
+const signer = provider.getSigner();
+
+const contract = new ZKsigDigitalSignatureContract({
+  chainId: await signer.getChainId(),
+  signer,
+});
+const agreements = await contract.getAgreements({
   page: 1,
   perPage: 10,
 });
@@ -38,12 +35,14 @@ const agreements = await getAgreements({
 
 ```typescript
 // Get a user's profile
-// This example uses a Web3Provider
 const provider = new providers.Web3Provider(window.ethereum);
 const signer = provider.getSigner();
-const agreements = await getProfile({
+
+const contract = new ZKsigDigitalSignatureContract({
+  chainId: await signer.getChainId(),
   signer,
 });
+const profile = await contract.getProfile();
 ```
 
 ## PDF Agreements with ZKsigAgreement
