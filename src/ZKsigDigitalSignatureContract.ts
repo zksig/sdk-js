@@ -1,12 +1,9 @@
-import type { Agreement, Profile } from "./types";
+import type { Agreement, Profile, SignaturePacket } from "./types";
 import type { ZKsigAgreement } from "./ZKsigAgreement";
 import { constants, Contract, Signer, VoidSigner } from "ethers";
-import { UnixFS } from "ipfs-unixfs";
-import { CID } from "multiformats/cid";
-import { sha256 } from "multiformats/hashes/sha2";
-import * as codec from "@ipld/dag-pb";
 import DigitalSignature from "./abi/DigitalSignature.json";
-import { encryptAgreementAndPin, pinFile } from "./files";
+import { downloadAndDecrypt, encryptAgreementAndPin, pinFile } from "./files";
+import { getAgreementEncryptionMessage } from "./encrypt";
 
 export type ZKsigDigitalSignatureContractOptions = {
   /**
@@ -86,6 +83,18 @@ export class ZKsigDigitalSignatureContract {
   }
 
   /**
+   * Get the message used to encrypt an agreement PDF before storing on
+   * IPFS/Filecoin.
+   */
+  getAgreementEncryptionMessage(agreement: Agreement) {
+    this._readyCheck();
+    return getAgreementEncryptionMessage(
+      this._contract.signer as VoidSigner,
+      agreement
+    );
+  }
+
+  /**
    * Get the connected signers ZKsig profile.
    */
   getProfile(): Promise<Profile> {
@@ -130,8 +139,23 @@ export class ZKsigDigitalSignatureContract {
       page: index + 1,
       perPage: 1,
     });
-    
+
     return agreement;
+  }
+
+  /**
+   * Download and decrypt an agreement PDF encrypted by the agreement
+   * owner.
+   */
+  async getAgreementPDF(agreement: Agreement, pw?: Uint8Array) {
+    if (!pw) {
+      pw = await this.getAgreementEncryptionMessage(agreement);
+    }
+
+    return downloadAndDecrypt({
+      cid: agreement.encryptedCid,
+      encryptionPWBytes: pw,
+    });
   }
 
   /**
@@ -175,25 +199,43 @@ export class ZKsigDigitalSignatureContract {
   }
 
   /**
+   * Download and decrypt an agreement PDF encrypted by a signer.
+   */
+  async getSignaturePDF({
+    agreement,
+    packet,
+  }: {
+    agreement: Agreement;
+    packet: Pick<SignaturePacket, "encryptedCid">;
+  }) {
+    const pw = await this.getAgreementEncryptionMessage(agreement);
+
+    return downloadAndDecrypt({
+      cid: packet.encryptedCid,
+      encryptionPWBytes: pw,
+    });
+  }
+
+  /**
    * Create a new ZKsig legally binding agreement.
    *
    * {@link ZKsigAgreement.createOnChain}
    */
   async createAgreement(agreement: ZKsigAgreement) {
     this._readyCheck();
-    const [address, pw, pdf] = await Promise.all([
+    const [address, cid, pdf] = await Promise.all([
       this._contract.signer.getAddress(),
-      this._contract.signer.signMessage(
-        `Encrypt PDF for ${agreement.getIdentifier()}`
-      ),
+      agreement.getCID(),
       agreement.toBytes(),
     ]);
 
-    const data = new UnixFS({ type: "file", data: pdf });
-    const cid = CID.create(
-      0,
-      codec.code,
-      await sha256.digest(codec.encode({ Data: data.marshal(), Links: [] }))
+    const pw = await getAgreementEncryptionMessage(
+      this._contract.signer as VoidSigner,
+      {
+        cid: cid.toV1().toString(),
+        owner: address,
+        identifier: agreement.getIdentifier(),
+      }
     );
 
     const constraints = agreement
@@ -209,7 +251,7 @@ export class ZKsigDigitalSignatureContract {
       encryptAgreementAndPin({
         pdf,
         name: `${address} - ${agreement.getIdentifier()}`,
-        encryptionPWBytes: Buffer.from(pw),
+        encryptionPWBytes: pw,
       }),
       pinFile({
         file: Buffer.from(JSON.stringify(agreement.getDescription())),
@@ -246,29 +288,16 @@ export class ZKsigDigitalSignatureContract {
     const signer = this._contract.signer;
     const [address, pw] = await Promise.all([
       signer.getAddress(),
-      (signer as VoidSigner)._signTypedData(
-        {},
-        {
-          AgreementSigner: [
-            { name: "Owner Address", type: "address" },
-            { name: "Agreement Identifier", type: "string" },
-            { name: "Agreement Index", type: "uint256" },
-            { name: "Signer Identifier", type: "string" },
-          ],
-        },
-        {
-          "Owner Address": agreement.owner,
-          "Agreement Identifier": agreement.identifier,
-          "Agreement Index": agreement.index,
-          "Signer Identifier": identifier,
-        }
+      getAgreementEncryptionMessage(
+        this._contract.signer as VoidSigner,
+        agreement
       ),
     ]);
 
     const encryptedCid = await encryptAgreementAndPin({
       pdf,
       name: `Signature - ${address} - ${identifier} on ${agreement.identifier}`,
-      encryptionPWBytes: Buffer.from(pw),
+      encryptionPWBytes: pw,
     });
 
     return this._contract.sign({
